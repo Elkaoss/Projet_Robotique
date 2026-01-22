@@ -20,7 +20,9 @@ class RadarInterface:
         self.current_distance = 0
         self.radar_points = []  # Pour l'effet de traînée
         self.map_points = []  # Pour la cartographie persistante
-        self.max_distance = 200  # Distance max en cm
+        self.max_distance = 400  # Distance max en cm (capteur ultrason)
+        self.is_scanning = False
+        self.scan_count = 0
         
         # Configuration interface
         self.setup_ui()
@@ -67,6 +69,16 @@ class RadarInterface:
                                      bg='#000000', fg='#ff0000', font=('Courier', 10, 'bold'))
         self.status_label.pack(side=tk.LEFT, padx=20)
         
+        # Indicateur de scan
+        self.scan_label = tk.Label(control_frame, text="", 
+                                   bg='#000000', fg='#ff00ff', font=('Courier', 10, 'bold'))
+        self.scan_label.pack(side=tk.LEFT, padx=10)
+        
+        # Compteur de scans
+        self.scan_counter = tk.Label(control_frame, text="Scans: 0", 
+                                     bg='#000000', fg='#00ffff', font=('Courier', 10))
+        self.scan_counter.pack(side=tk.LEFT, padx=10)
+        
         # Bouton reset cartographie
         self.reset_btn = tk.Button(control_frame, text="Reset Carte", 
                                    command=self.reset_map,
@@ -110,9 +122,30 @@ class RadarInterface:
                                 bg='#000000', fg='#00ff00', font=('Courier', 10))
         self.map_info.pack(pady=5)
         
+        # Log des événements
+        log_frame = tk.Frame(main_frame, bg='#000000')
+        log_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+        
+        tk.Label(log_frame, text="LOG ÉVÉNEMENTS:", bg='#000000', fg='#00ff00',
+                font=('Courier', 10, 'bold')).pack(anchor=tk.W)
+        
+        self.log_text = tk.Text(log_frame, height=4, bg='#001a00', fg='#00ff00',
+                               font=('Courier', 8), relief=tk.FLAT)
+        self.log_text.pack(fill=tk.X, padx=5, pady=5)
+        
         # Dessiner les grilles initiales
         self.root.after(100, self.draw_radar_grid)
         self.root.after(100, self.draw_map_grid)
+    
+    def log_event(self, message):
+        """Ajouter un message au log"""
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.see(tk.END)
+        # Limiter le nombre de lignes
+        lines = self.log_text.get("1.0", tk.END).split("\n")
+        if len(lines) > 50:
+            self.log_text.delete("1.0", "2.0")
     
     def refresh_ports(self):
         """Rafraîchir la liste des ports série"""
@@ -127,24 +160,28 @@ class RadarInterface:
             try:
                 port = self.port_var.get()
                 if not port:
+                    self.log_event("Erreur: Aucun port sélectionné")
                     return
                 
-                self.serial_port = serial.Serial(port, 9600, timeout=1)
+                self.serial_port = serial.Serial(port, 115200, timeout=1)
                 self.is_running = True
                 self.connect_btn.config(text="Déconnecter", bg='#330000', fg='#ff0000')
                 self.status_label.config(text="● Connecté", fg='#00ff00')
+                self.log_event(f"Connecté au port {port}")
                 
                 # Démarrer le thread de lecture
                 self.read_thread = threading.Thread(target=self.read_serial, daemon=True)
                 self.read_thread.start()
             except Exception as e:
-                self.status_label.config(text=f"● Erreur: {str(e)}", fg='#ff0000')
+                self.status_label.config(text=f"● Erreur", fg='#ff0000')
+                self.log_event(f"Erreur connexion: {str(e)}")
         else:
             self.is_running = False
             if self.serial_port:
                 self.serial_port.close()
             self.connect_btn.config(text="Connecter", bg='#003300', fg='#00ff00')
             self.status_label.config(text="● Déconnecté", fg='#ff0000')
+            self.log_event("Déconnecté")
     
     def read_serial(self):
         """Lire les données du port série"""
@@ -152,17 +189,42 @@ class RadarInterface:
             try:
                 if self.serial_port and self.serial_port.in_waiting > 0:
                     line = self.serial_port.readline().decode('utf-8').strip()
-                    # Format attendu: "A:120,D:85" (Angle:120°, Distance:85cm)
-                    if 'A:' in line and 'D:' in line:
-                        parts = line.split(',')
-                        angle = int(parts[0].split(':')[1])
-                        distance = int(parts[1].split(':')[1])
-                        self.current_angle = angle
-                        self.current_distance = distance
-                        
-                        # Ajouter le point pour la cartographie
-                        if distance > 0 and distance < self.max_distance:
-                            self.add_map_point(angle, distance)
+                    
+                    # Format: "D:angle:distance"
+                    if line.startswith("D:"):
+                        parts = line.split(':')
+                        if len(parts) == 3:
+                            angle = int(parts[1])
+                            distance = float(parts[2])
+                            self.current_angle = angle
+                            self.current_distance = distance
+                            
+                            # Ajouter le point pour la cartographie
+                            if distance > 0 and distance < self.max_distance:
+                                self.add_map_point(angle, distance)
+                    
+                    # Événements spéciaux
+                    elif line.startswith("EVENT:"):
+                        event = line.split(':')[1]
+                        if event == "OBSTACLE":
+                            self.log_event("⚠️  Obstacle détecté - Début scan")
+                        elif event == "METRE":
+                            self.log_event("📏 1 mètre parcouru - Début scan")
+                    
+                    # Statuts
+                    elif line.startswith("STATUS:"):
+                        status = line.split(':')[1]
+                        if status == "SCAN_START":
+                            self.is_scanning = True
+                            self.scan_count += 1
+                            self.scan_label.config(text="🔄 SCAN EN COURS")
+                            self.scan_counter.config(text=f"Scans: {self.scan_count}")
+                            self.log_event("🔄 Début du scan 360°")
+                        elif status == "SCAN_END":
+                            self.is_scanning = False
+                            self.scan_label.config(text="")
+                            self.log_event("✓ Scan 360° terminé")
+                    
             except Exception as e:
                 print(f"Erreur lecture série: {e}")
             time.sleep(0.01)
@@ -172,11 +234,12 @@ class RadarInterface:
         self.map_points = []
         self.draw_map_grid()
         self.map_info.config(text="Points détectés: 0")
+        self.log_event("🗑️  Carte réinitialisée")
     
     def add_map_point(self, angle, distance):
         """Ajouter un point à la carte"""
         self.map_points.append((angle, distance))
-        if len(self.map_points) > 500:  # Limiter le nombre de points
+        if len(self.map_points) > 1000:  # Limiter le nombre de points
             self.map_points.pop(0)
     
     def draw_radar_grid(self):
@@ -192,7 +255,7 @@ class RadarInterface:
         
         center_x = width // 2
         center_y = height // 2
-        radius = min(center_x, center_y) - 20
+        radius = min(center_x, center_y) - 30
         
         # Cercles concentriques
         for i in range(1, 5):
@@ -202,7 +265,7 @@ class RadarInterface:
                                          outline='#004400', width=1)
             # Labels de distance
             distance_label = int(self.max_distance * i / 4)
-            self.radar_canvas.create_text(center_x + r - 20, center_y - 5,
+            self.radar_canvas.create_text(center_x + r - 25, center_y - 5,
                                          text=f"{distance_label}cm",
                                          fill='#006600', font=('Courier', 8))
         
@@ -277,7 +340,7 @@ class RadarInterface:
         if width > 1 and height > 1:
             center_x = width // 2
             center_y = height // 2
-            radius = min(center_x, center_y) - 20
+            radius = min(center_x, center_y) - 30
             
             # Dessiner les points de traînée (effet sonar)
             for i, (angle, distance, alpha) in enumerate(self.radar_points):
@@ -291,7 +354,8 @@ class RadarInterface:
                     intensity = int(255 * alpha)
                     color = f"#{0:02x}{intensity:02x}{0:02x}"
                     
-                    self.radar_canvas.create_oval(x - 3, y - 3, x + 3, y + 3,
+                    size = 3 if distance < 50 else 2  # Plus gros si proche
+                    self.radar_canvas.create_oval(x - size, y - size, x + size, y + size,
                                                  fill=color, outline=color)
                 
                 # Décrémenter l'alpha
@@ -305,10 +369,11 @@ class RadarInterface:
                 self.radar_points.append((self.current_angle, self.current_distance, 1.0))
             
             # Dessiner le faisceau de balayage avec effet de rémanence
-            for i in range(15):
+            sweep_length = 20 if self.is_scanning else 15
+            for i in range(sweep_length):
                 angle_offset = i * 2
-                alpha = 1.0 - (i / 15.0)
-                intensity = int(255 * alpha * 0.5)
+                alpha = 1.0 - (i / sweep_length)
+                intensity = int(255 * alpha * 0.6)
                 color = f"#{0:02x}{intensity:02x}{0:02x}"
                 
                 angle = self.current_angle - angle_offset
@@ -316,18 +381,25 @@ class RadarInterface:
                 x = center_x + radius * math.cos(rad)
                 y = center_y + radius * math.sin(rad)
                 
+                width_line = 3 if i < 5 else 2
                 self.radar_canvas.create_line(center_x, center_y, x, y,
-                                             fill=color, width=2)
+                                             fill=color, width=width_line)
             
             # Ligne principale du radar (plus brillante)
             rad = math.radians(self.current_angle - 90)
             x = center_x + radius * math.cos(rad)
             y = center_y + radius * math.sin(rad)
+            main_color = '#ff00ff' if self.is_scanning else '#00ff00'
             self.radar_canvas.create_line(center_x, center_y, x, y,
-                                         fill='#00ff00', width=3)
+                                         fill=main_color, width=4)
+            
+            # Cercle lumineux à l'extrémité du rayon
+            self.radar_canvas.create_oval(x - 4, y - 4, x + 4, y + 4,
+                                         fill=main_color, outline=main_color)
             
             # Mettre à jour les infos
-            self.radar_info.config(text=f"Angle: {self.current_angle}° | Distance: {self.current_distance} cm")
+            dist_text = f"{self.current_distance:.1f}" if self.current_distance > 0 else "---"
+            self.radar_info.config(text=f"Angle: {self.current_angle}° | Distance: {dist_text} cm")
         
         # Mettre à jour la cartographie
         self.update_map()
@@ -345,7 +417,7 @@ class RadarInterface:
         if width > 1 and height > 1:
             center_x = width // 2
             center_y = height // 2
-            scale = min(width, height) / (2 * self.max_distance) * 0.8
+            scale = min(width, height) / (2 * self.max_distance) * 0.85
             
             # Dessiner tous les points de la carte
             for angle, distance in self.map_points:
@@ -354,18 +426,28 @@ class RadarInterface:
                 x = center_x + distance * scale * math.cos(rad)
                 y = center_y + distance * scale * math.sin(rad)
                 
-                # Point vert
-                self.map_canvas.create_oval(x - 2, y - 2, x + 2, y + 2,
-                                           fill='#00ff00', outline='#00ff00')
+                # Couleur selon la distance (proche = rouge, loin = vert)
+                if distance < 50:
+                    color = '#ff0000'
+                    size = 3
+                elif distance < 100:
+                    color = '#ffff00'
+                    size = 2
+                else:
+                    color = '#00ff00'
+                    size = 2
+                
+                self.map_canvas.create_oval(x - size, y - size, x + size, y + size,
+                                           fill=color, outline=color)
             
-            # Point actuel en rouge (plus gros)
+            # Point actuel en cyan (plus gros)
             if self.current_distance > 0 and self.current_distance < self.max_distance:
                 rad = math.radians(self.current_angle - 90)
                 x = center_x + self.current_distance * scale * math.cos(rad)
                 y = center_y + self.current_distance * scale * math.sin(rad)
                 
-                self.map_canvas.create_oval(x - 4, y - 4, x + 4, y + 4,
-                                           fill='#ff0000', outline='#ff0000')
+                self.map_canvas.create_oval(x - 5, y - 5, x + 5, y + 5,
+                                           fill='#00ffff', outline='#ffffff', width=2)
             
             # Mettre à jour le compteur
             self.map_info.config(text=f"Points détectés: {len(self.map_points)}")
