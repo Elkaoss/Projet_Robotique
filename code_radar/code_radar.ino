@@ -1,291 +1,230 @@
 /*
- * ROBOT RADAR AUTONOME mBOT - VERSION OPTIMISÉE
- * Améliorations :
- * - Utilisation des classes MeMCore.h officielles (MeUltrasonicSensor, etc.)
- * - Ajout de filtrage des mesures ultrason (moyenne glissante)
- * - Correction du calcul d'angle avec odométrie approximative
- * - Gestion améliorée du Bluetooth (buffer)
- * - Mode debug optionnel
+ * ROBOT RADAR AUTONOME - VERSION PRO (Filtrée & State Machine)
+ * Matériel : mBot (mCore), Capteur Ultrason (Port 3)
  */
 
 #include <MeMCore.h>
 
-// --- CONFIGURATION DES PORTS ---
-MeUltrasonicSensor ultr(PORT_3);  // ✅ Classe correcte (pas MeUltrasonic)
-MeDCMotor MotorL(M1);             // Moteur Gauche sur M1
-MeDCMotor MotorR(M2);             // Moteur Droit sur M2
-MeRGBLed rgb(0, 2);               // LED interne (pin 0, 2 LEDs)
-MeBuzzer buzzer;                  // Buzzer intégré
+// --- CONFIGURATION MATERIELLE ---
+MeUltrasonicSensor ultr(PORT_3);
+MeDCMotor MotorL(M1);
+MeDCMotor MotorR(M2);
+MeRGBLed rgb(7, 2);
+MeBuzzer buzzer;
 
-// --- CALIBRAGE (à ajuster selon votre robot) ---
-int moveSpeed = 160;              // Vitesse d'avancement (0-255)
-int turnSpeed = 140;              // Vitesse de rotation scan
-const unsigned long TIME_FOR_1M = 4000;    // Temps pour ~1m (ms)
-const unsigned long TIME_FOR_360 = 2300;   // Temps pour 360° (ms)
+// --- REGLAGES FINS (A calibrer !) ---
+const int SPEED_FWD = 160;       // Vitesse avant
+const int SPEED_SCAN = 145;      // Vitesse très lente pour le scan (précision)
+const int SPEED_TURN = 160;      // Vitesse pour le virage 90°
+const int MOTOR_KICK = 200;      // Impulsion de départ pour vaincre l'inertie
 
-// --- CONSTANTES ---
-const int OBSTACLE_DISTANCE = 50;     // Seuil détection obstacle (cm)
-const int MIN_DISTANCE = 3;           // Distance min capteur (cm)
-const int MAX_DISTANCE = 400;         // Distance max capteur (cm)
-const int SCAN_DELAY = 80;            // Délai entre mesures (ms)
-const int SCAN_SAMPLES = 3;           // Nombre de mesures moyennes
-const bool DEBUG_MODE = false;        // Activer logs détaillés
+// Temps (ms)
+const unsigned long DUREE_SCAN_360 = 2600; // Temps pour faire un tour complet
+const unsigned long DUREE_TURN_90  = 550;  // Temps pour faire 90°
+const unsigned long DELAI_SCAN_AUTO = 10000; // Scan auto toutes les 10s
 
-// --- VARIABLES ---
-bool isRunning = false;
-unsigned long lastMoveTime = 0;
-unsigned long lastButtonPress = 0;
-float currentX = 0, currentY = 0;     // Position estimée (cm)
-float currentAngle = 0;               // Orientation estimée (degrés)
+// Distances (cm)
+const int SEUIL_OBSTACLE = 45;
+const int DIST_MAX = 400;
+
+// --- ETATS DU ROBOT (Machine à états) ---
+enum RobotState {
+  IDLE,       // Au repos / Initialisation
+  MOVING,     // Avance
+  SCANNING,   // Tourne et cartographie
+  AVOIDING    // Manœuvre d'évitement
+};
+
+RobotState currentState = IDLE;
+
+// --- VARIABLES GLOBALES ---
+unsigned long stateStartTime = 0;
+unsigned long lastScanTime = 0;
+int bestDirection = 0; // 1 = Droite, -1 = Gauche
+long sumRight = 0;
+long sumLeft = 0;
 
 void setup() {
-  Serial.begin(9600);  // ✅ 9600 baud recommandé pour Bluetooth stable
+  Serial.begin(9600); // Débit rapide pour la télémétrie
+  rgb.setNumber(16);
   
-  // Initialisation LED
-  rgb.setpin(13);  // ✅ Pin 13 sur mCore
-  rgb.setColor(0, 0, 50);  // Bleu = prêt
+  // Séquence de démarrage
+  rgb.setColor(0, 0, 50); // Bleu
   rgb.show();
+  buzzer.tone(500, 100);
+  delay(100);
+  buzzer.tone(1000, 200);
   
-  Stop();
-  delay(1000);  // Stabilisation capteurs
-  
-  Serial.println("STATUS:READY");
-  Serial.println("INFO:mBot Radar v2.0");
-  buzzer.tone(800, 100);
-  delay(150);
-  buzzer.tone(1000, 100);
+  delay(1000); 
+  changeState(MOVING);
 }
 
 void loop() {
-  // --- GESTION BOUTON START/STOP ---
-  if (analogRead(A7) < 100) {  // ✅ Seuil plus robuste (était < 10)
-    if (millis() - lastButtonPress > 800) {  // Anti-rebond 800ms
-      lastButtonPress = millis();
-      isRunning = !isRunning;
-      
-      if (isRunning) {
-        startRobot();
-      } else {
-        stopRobot();
-      }
-      
-      // Attendre relâchement
-      while(analogRead(A7) < 100) delay(10);
-    }
-  }
-
-  if (!isRunning) return;
-
-  // --- LECTURE CAPTEUR FILTRÉE ---
-  float dist = getFilteredDistance();
-  
-  if (DEBUG_MODE) {
-    Serial.print("DIST:");
-    Serial.println(dist);
-  }
-
-  // --- LOGIQUE NAVIGATION ---
-  
-  // CAS 1 : Obstacle proche
-  if (dist < OBSTACLE_DISTANCE) {
-    handleObstacle();
-  }
-  
-  // CAS 2 : 1 mètre parcouru
-  else if (millis() - lastMoveTime > TIME_FOR_1M) {
-    handleMeterMark();
-  }
-  
-  // CAS 3 : Voie libre
-  else {
-    Forward();
-    updateOdometry(moveSpeed, 50);  // Update position estimée
-  }
-  
-  delay(50);  // ✅ Petit délai pour stabilité
-}
-
-// --- FONCTION DISTANCE FILTRÉE (moyenne) ---
-float getFilteredDistance() {
-  float sum = 0;
-  int validCount = 0;
-  
-  for (int i = 0; i < SCAN_SAMPLES; i++) {
-    float d = ultr.distanceCm();
+  // Gestion principale selon l'état du robot
+  switch (currentState) {
     
-    if (d >= MIN_DISTANCE && d <= MAX_DISTANCE) {
-      sum += d;
-      validCount++;
-    }
-    delay(30);  // Délai entre mesures ultrason
+    case MOVING:
+      manageMoving();
+      break;
+
+    case SCANNING:
+      manageScanning();
+      break;
+
+    case AVOIDING:
+      // L'évitement est bloquant (court), géré directement après le scan
+      break;
+  }
+}
+
+// --- GESTIONNAIRES D'ETATS ---
+
+void manageMoving() {
+  // 1. Lire la distance (filtrée pour éviter les faux positifs)
+  float dist = getFilteredDistance();
+
+  // 2. Vérifier Obstacle
+  if (dist > 0 && dist < SEUIL_OBSTACLE) {
+    Stop();
+    buzzer.tone(1500, 100); // Alerte sonore
+    Serial.println("EVENT:OBSTACLE_DETECTED");
+    changeState(SCANNING);
+    return;
+  }
+
+  // 3. Vérifier Temps (Scan périodique)
+  if (millis() - lastScanTime > DELAI_SCAN_AUTO) {
+    Stop();
+    Serial.println("EVENT:AUTO_SCAN");
+    changeState(SCANNING);
+    return;
+  }
+
+  // 4. Sinon, on avance
+  Forward();
+}
+
+void manageScanning() {
+  unsigned long timeInScan = millis() - stateStartTime;
+  
+  // Fin du scan ?
+  if (timeInScan >= DUREE_SCAN_360) {
+    Stop();
+    Serial.println("EVENT:SCAN_COMPLETE");
+    
+    // Décision intelligente basculée sur les sommes accumulées
+    if (sumRight > sumLeft) bestDirection = 1; // Droite plus vide
+    else bestDirection = -1; // Gauche plus vide
+
+    performAvoidance(bestDirection); // Faire la manœuvre
+    
+    lastScanTime = millis(); // Reset chrono
+    changeState(MOVING);     // Repartir
+    return;
+  }
+
+  // --- LOGIQUE DE SCAN ---
+  
+  // Calcul de l'angle courant (estimation linéaire)
+  float progress = (float)timeInScan / DUREE_SCAN_360;
+  int currentAngle = (int)(progress * 360);
+  
+  // Lecture capteur
+  float dist = ultr.distanceCm();
+  if (dist == 0 || dist > DIST_MAX) dist = DIST_MAX; // Nettoyage
+
+  // Envoi données
+  Serial.print("A:"); Serial.print(currentAngle);
+  Serial.print(":D:"); Serial.println(dist);
+
+  // Accumulation pour l'intelligence (Droite = 0-180, Gauche = 180-360)
+  // Note: Selon le sens de rotation, ajuster ces plages.
+  if (currentAngle < 180) sumRight += (long)dist;
+  else sumLeft += (long)dist;
+
+  // Petit délai pour ne pas saturer le port série
+  delay(30); 
+}
+
+// --- FONCTIONS AUXILIAIRES ---
+
+void performAvoidance(int dir) {
+  // Etat temporaire
+  rgb.setColor(50, 50, 0); // Jaune
+  rgb.show();
+  
+  // 1. Recul de sécurité
+  Backward();
+  delay(400);
+  Stop();
+  delay(200);
+
+  // 2. Rotation vers la zone libre
+  if (dir == 1) {
+    Serial.println("MSG:DECISION_RIGHT");
+    TurnRight();
+  } else {
+    Serial.println("MSG:DECISION_LEFT");
+    TurnLeft();
   }
   
-  if (validCount == 0) return MAX_DISTANCE;
-  
-  return sum / validCount;
-}
-
-// --- DÉMARRAGE ROBOT ---
-void startRobot() {
-  rgb.setColor(0, 50, 0);  // Vert
-  rgb.show();
-  buzzer.tone(1200, 150);
-  
-  Serial.println("STATUS:STARTED");
-  Serial.print("POS:");
-  Serial.print(currentX);
-  Serial.print(":");
-  Serial.println(currentY);
-  
-  lastMoveTime = millis();
-  currentX = 0;
-  currentY = 0;
-  currentAngle = 0;
-  
-  delay(1000);
-}
-
-// --- ARRÊT ROBOT ---
-void stopRobot() {
-  Stop();
-  rgb.setColor(50, 0, 0);  // Rouge
-  rgb.show();
-  buzzer.tone(600, 200);
-  Serial.println("STATUS:STOPPED");
-}
-
-// --- GESTION OBSTACLE ---
-void handleObstacle() {
-  Stop();
-  buzzer.tone(2200, 80);
-  delay(100);
-  
-  Serial.println("EVENT:OBSTACLE");
-  performRadarScan();
-  
-  // Évitement
-  Backward();
-  delay(600);
-  updateOdometry(-moveSpeed, 600);
-  
-  TurnLeft();
-  delay(700);  // ~90°
-  currentAngle += 90;
-  if (currentAngle >= 360) currentAngle -= 360;
-  
+  delay(DUREE_TURN_90);
   Stop();
   delay(300);
-  lastMoveTime = millis();
-}
-
-// --- GESTION REPÈRE 1M ---
-void handleMeterMark() {
-  Stop();
-  buzzer.tone(1000, 80);
-  delay(100);
-  buzzer.tone(1200, 80);
   
-  Serial.println("EVENT:METRE");
-  Serial.print("POS:");
-  Serial.print(currentX);
-  Serial.print(":");
-  Serial.println(currentY);
-  
-  performRadarScan();
-  lastMoveTime = millis();
-}
-
-// --- SCAN RADAR 360° AMÉLIORÉ ---
-void performRadarScan() {
-  Serial.println("STATUS:SCAN_START");
-  rgb.setColor(30, 0, 30);  // Violet
+  rgb.setColor(0, 50, 0); // Retour vert
   rgb.show();
+}
 
-  unsigned long scanStart = millis();
-  unsigned long lastMeasure = 0;
-  int measureCount = 0;
+void changeState(RobotState newState) {
+  Stop(); // Toujours arrêter les moteurs entre les états
+  currentState = newState;
+  stateStartTime = millis();
   
-  // Rotation
-  MotorL.run(-turnSpeed);
-  MotorR.run(turnSpeed);
-
-  while (millis() - scanStart < TIME_FOR_360) {
-    if (millis() - lastMeasure >= SCAN_DELAY) {
-      lastMeasure = millis();
-      
-      // Calcul angle avec correction
-      float progress = (float)(millis() - scanStart) / TIME_FOR_360;
-      int angle = (int)(progress * 360.0);
-      angle = constrain(angle, 0, 360);
-      
-      // Mesure filtrée rapide (2 échantillons)
-      float d1 = ultr.distanceCm();
-      delay(20);
-      float d2 = ultr.distanceCm();
-      
-      float reading = (d1 + d2) / 2.0;
-      
-      // Validation
-      if (reading < MIN_DISTANCE || reading > MAX_DISTANCE) {
-        reading = MAX_DISTANCE;
-      }
-
-      // Format optimisé pour parsing Python
-      Serial.print("D:");
-      Serial.print(angle);
-      Serial.print(":");
-      Serial.print(reading, 1);  // 1 décimale
-      Serial.print(":");
-      Serial.print(currentX, 0);  // Position X
-      Serial.print(":");
-      Serial.println(currentY, 0);  // Position Y
-      
-      measureCount++;
-    }
+  if (newState == SCANNING) {
+    rgb.setColor(50, 0, 50); // Violet
+    rgb.show();
+    
+    // Reset des compteurs d'intelligence
+    sumRight = 0;
+    sumLeft = 0;
+    
+    // KICK MOTEUR : Impulsion courte pour lancer la rotation lente
+    MotorL.run(-MOTOR_KICK);
+    MotorR.run(-MOTOR_KICK);
+    delay(50); 
+    // Puis vitesse de croisière lente
+    MotorL.run(-SPEED_SCAN);
+    MotorR.run(-SPEED_SCAN);
   }
-
-  Stop();
-  Serial.print("STATUS:SCAN_END:");
-  Serial.println(measureCount);
-  
-  rgb.setColor(0, 50, 0);
-  rgb.show();
-  delay(500);
+  else if (newState == MOVING) {
+    rgb.setColor(0, 50, 0); // Vert
+    rgb.show();
+  }
 }
 
-// --- ODOMÉTRIE SIMPLE (estimation) ---
-void updateOdometry(int speed, unsigned long duration) {
-  // Calcul approximatif : vitesse × temps → distance
-  float distance = (float)(speed * duration) / (255.0 * 1000.0) * 50.0;  // ~50cm/s à pleine vitesse
-  
-  // Mise à jour position en coordonnées cartésiennes
-  float radAngle = currentAngle * PI / 180.0;
-  currentX += distance * cos(radAngle);
-  currentY += distance * sin(radAngle);
+// --- FILTRE MEDIAN (Anti-Bruit) ---
+float getFilteredDistance() {
+  float d1 = ultr.distanceCm();
+  delay(5); // Petit délai entre mesures
+  float d2 = ultr.distanceCm();
+  delay(5);
+  float d3 = ultr.distanceCm();
+
+  // Si une mesure est 0 (erreur), on la met au max pour ne pas fausser le tri
+  if(d1 == 0) d1 = DIST_MAX;
+  if(d2 == 0) d2 = DIST_MAX;
+  if(d3 == 0) d3 = DIST_MAX;
+
+  // Tri simple pour trouver la médiane (valeur du milieu)
+  if ((d1 <= d2 && d2 <= d3) || (d3 <= d2 && d2 <= d1)) return d2;
+  if ((d2 <= d1 && d1 <= d3) || (d3 <= d1 && d1 <= d2)) return d1;
+  return d3;
 }
 
-// --- MOUVEMENTS MOTEURS ---
-void Forward() {
-  MotorL.run(-moveSpeed);
-  MotorR.run(moveSpeed);
-}
-
-void Backward() {
-  MotorL.run(moveSpeed);
-  MotorR.run(-moveSpeed);
-}
-
-void TurnLeft() {
-  MotorL.run(-moveSpeed);
-  MotorR.run(-moveSpeed);
-}
-
-void TurnRight() {
-  MotorL.run(moveSpeed);
-  MotorR.run(moveSpeed);
-}
-
-void Stop() {
-  MotorL.stop();  // ✅ Utilise .stop() au lieu de .run(0)
-  MotorR.stop();
-}
+// --- MOTEURS ---
+void Forward() { MotorL.run(-SPEED_FWD); MotorR.run(SPEED_FWD); }
+void Backward() { MotorL.run(SPEED_FWD); MotorR.run(-SPEED_FWD); }
+void TurnLeft() { MotorL.run(-SPEED_TURN); MotorR.run(-SPEED_TURN); }
+void TurnRight() { MotorL.run(SPEED_TURN); MotorR.run(SPEED_TURN); }
+void Stop() { MotorL.run(0); MotorR.run(0); }
