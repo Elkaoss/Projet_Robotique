@@ -14,7 +14,7 @@ MeBuzzer buzzer;
 
 // --- REGLAGES FINS (A calibrer !) ---
 const int SPEED_FWD = 160;       // Vitesse avant
-const int SPEED_SCAN = 115;      // Vitesse très lente pour le scan (précision)
+const int SPEED_SCAN = 145;      // Vitesse très lente pour le scan (précision)
 const int SPEED_TURN = 160;      // Vitesse pour le virage 90°
 const int MOTOR_KICK = 200;      // Impulsion de départ pour vaincre l'inertie
 
