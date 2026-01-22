@@ -191,11 +191,11 @@ void changeState(RobotState newState) {
     
     // KICK MOTEUR : Impulsion courte pour lancer la rotation lente
     MotorL.run(-MOTOR_KICK);
-    MotorR.run(MOTOR_KICK);
+    MotorR.run(-MOTOR_KICK);
     delay(50); 
     // Puis vitesse de croisière lente
     MotorL.run(-SPEED_SCAN);
-    MotorR.run(SPEED_SCAN);
+    MotorR.run(-SPEED_SCAN);
   }
   else if (newState == MOVING) {
     rgb.setColor(0, 50, 0); // Vert
