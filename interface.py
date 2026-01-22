@@ -223,10 +223,16 @@ class RadarInterface:
                                 self.current_distance = distance
                                 
                                 # Ajouter point
+                                if angle <=7 :
+                                    self.map_points = []
+                                    
                                 if 0 < distance < self.max_distance:
+                                    
                                     self.add_map_point(angle, distance)
+                                    
                                 
                                 print(f"Angle: {angle}° Distance: {distance}cm")  # Debug
+                            
                                     
                         except (ValueError, IndexError) as e:
                             print(f"Erreur parsing: {e} - Ligne: {line}")
@@ -235,8 +241,16 @@ class RadarInterface:
                     elif line.startswith("EVENT:"):
                         event = line.split(':', 1)[1]
                         if event == "OBSTACLE":
+                            self.map_points = []
+                            self.reset_map(self)
                             self.log_event("⚠️  Obstacle détecté")
                         elif event == "METRE":
+                            self.map_points = []
+                            self.reset_map(self)
+                            self.log_event("📏 1 mètre parcouru")
+                        elif event == "AUTO_SCAN":
+                            self.map_points = []
+                            self.reset_map(self)
                             self.log_event("📏 1 mètre parcouru")
                     
                     # Statuts
@@ -246,6 +260,8 @@ class RadarInterface:
                             status = status_parts[1]
                             
                             if status == "SCAN_START":
+                                self.reset_map(self)
+                                self.map_points = []
                                 self.is_scanning = True
                                 self.scan_count += 1
                                 self.scan_label.config(text="🔄 SCAN EN COURS")
