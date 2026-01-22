@@ -1,65 +1,77 @@
 /*
- * ROBOT RADAR AUTONOME mBOT
- * Fonctionnalités :
- * 1. Navigation autonome (sans télécommande).
- * 2. Arrêt et Scan Radar si obstacle < 50cm.
- * 3. Arrêt et Scan Radar automatique tous les 1 mètre (estimé par temps).
- * 4. Envoi des données vers le PC pour cartographie Python.
+ * ROBOT RADAR AUTONOME mBOT - VERSION FINALE
+ * Compatible avec l'interface Python Tkinter
+ * * Fonctionnement :
+ * 1. Appui bouton carte : Démarrage / Arrêt.
+ * 2. Avance tout droit.
+ * 3. Si obstacle < 50cm OU Si temps écoulé > 4 sec (1 mètre) :
+ * -> ARRET
+ * -> SCAN 360° (Envoi des données A:angle,D:distance)
+ * -> Reprise de la route.
  */
 
 #include <MeMCore.h>
 #include <Wire.h>
 #include <SoftwareSerial.h>
 
-// --- CONFIGURATION DES PORTS ---
-MeUltrasonic ultr(PORT_3);   // Capteur Ultrason sur le Port 3
-MeDCMotor MotorL(M1);        // Moteur Gauche sur M1
-MeDCMotor MotorR(M2);        // Moteur Droit sur M2
+// --- CONFIGURATION MATÉRIELLE ---
+MeUltrasonic ultr(PORT_3);   // Capteur Ultrason branché sur le Port 3
+MeDCMotor MotorL(M1);        // Moteur Gauche
+MeDCMotor MotorR(M2);        // Moteur Droit
 MeRGBLed rgb(7, 2);          // LED intégrée
 MeBuzzer buzzer;             // Buzzer intégré
 
-// --- CALIBRAGE (A ajuster selon votre batterie et sol) ---
-int moveSpeed = 160;         // Vitesse d'avancement
-int turnSpeed = 140;         // Vitesse de rotation pour le scan
-const unsigned long TIME_FOR_1M = 4000;  // Temps pour faire ~1 mètre (ms)
-const unsigned long TIME_FOR_360 = 2300; // Temps pour faire un tour complet (ms)
+// --- PARAMÈTRES (À CALIBRER SELON LA BATTERIE) ---
+int moveSpeed = 160;         // Vitesse pour avancer
+int turnSpeed = 140;         // Vitesse pour tourner (scan)
 
-// --- VARIABLES ---
+// Temps estimé pour parcourir 1 mètre (en millisecondes)
+const unsigned long TIME_FOR_1M = 4000; 
+
+// Temps estimé pour faire un tour complet 360° (en millisecondes)
+const unsigned long TIME_FOR_360 = 2300; 
+
+// --- VARIABLES GLOBALES ---
 bool isRunning = false;          // État du robot
 unsigned long lastMoveTime = 0;  // Chronomètre pour la distance
 float dist = 0;                  // Distance lue
 
 void setup() {
-  Serial.begin(115200); // Vitesse rapide pour le transfert de données
-  rgb.setNumber(16);
+  // Initialisation Série à 115200 bauds (Doit correspondre au Python)
+  Serial.begin(115200); 
   
-  // Signal de prêt (LED Bleue)
-  rgb.setColor(0, 0, 50);
+  // Initialisation LED
+  rgb.setNumber(16);
+  rgb.setColor(0, 0, 50); // Bleu (En attente)
   rgb.show();
-  Stop();
+  
+  Stop(); // Moteurs à l'arrêt au démarrage
 }
 
 void loop() {
-  // --- GESTION DU BOUTON START/STOP ---
-  if (analogRead(A7) < 10) { // Si bouton appuyé
+  // ---------------------------------------------------------
+  // 1. GESTION DU BOUTON (ON/OFF)
+  // ---------------------------------------------------------
+  // Le bouton du mCore est sur A7.
+  if (analogRead(A7) < 10) { 
     delay(50); // Anti-rebond
     if (analogRead(A7) < 10) {
-      isRunning = !isRunning; // Inverser l'état
+      isRunning = !isRunning; // On inverse l'état
       
       if (isRunning) {
         // Démarrage
-        rgb.setColor(0, 50, 0); // Vert
+        rgb.setColor(0, 50, 0); // Vert = Marche
         rgb.show();
         buzzer.tone(1000, 200);
-        lastMoveTime = millis(); // Reset du chrono
-        delay(1000); // Temps pour retirer sa main
+        lastMoveTime = millis(); // Reset du chrono distance
+        delay(1000); // Pause pour retirer le doigt
       } else {
         // Arrêt
         Stop();
-        rgb.setColor(50, 0, 0); // Rouge
+        rgb.setColor(50, 0, 0); // Rouge = Stop
         rgb.show();
         buzzer.tone(500, 200);
-        while(analogRead(A7) < 10); // Attendre relâchement
+        while(analogRead(A7) < 10); // Attendre relâchement du bouton
       }
     }
   }
@@ -67,98 +79,106 @@ void loop() {
   // Si le robot est en pause, on arrête la boucle ici
   if (!isRunning) return;
 
-  // --- LECTURE CAPTEURS ---
+  // ---------------------------------------------------------
+  // 2. LECTURE CAPTEURS & LOGIQUE
+  // ---------------------------------------------------------
   dist = ultr.distanceCm();
-  if (dist == 0) dist = 400; // Correction bruit capteur
+  if (dist == 0) dist = 400; // Filtrage des erreurs (0 = infini ou erreur)
 
-  // --- LOGIQUE DE NAVIGATION ---
-
-  // CAS 1 : Obstacle détecté (< 50cm)
+  // CAS A : OBSTACLE PROCHE (< 50cm)
   if (dist < 50) {
     Stop();
-    buzzer.tone(2000, 100); // Bip aigu
+    buzzer.tone(2000, 100); // Bip d'alerte
     delay(200);
     
-    // Envoyer signal à Python : "J'ai trouvé un obstacle, je scanne"
-    Serial.println("EVENT:OBSTACLE"); 
-    performRadarScan(); // Faire le 360
-
-    // Manœuvre d'évitement
-    Backward(); delay(600);
-    TurnLeft(); delay(700); // Tourner d'environ 90° (ajuster délai)
-    Stop();     delay(300);
+    // Lancer le scan radar
+    performRadarScan();
     
-    lastMoveTime = millis(); // Reset du compteur 1m
+    // Manœuvre d'évitement après le scan
+    Backward(); delay(500);
+    TurnLeft(); delay(600); // Tourne d'environ 90° (ajuster le délai si besoin)
+    Stop();     delay(200);
+    
+    lastMoveTime = millis(); // Reset du chrono 1m
   }
   
-  // CAS 2 : 1 Mètre parcouru (Temps écoulé)
+  // CAS B : 1 MÈTRE PARCOURU (Simulé par le temps)
   else if (millis() - lastMoveTime > TIME_FOR_1M) {
     Stop();
-    buzzer.tone(1000, 100); delay(100); buzzer.tone(1000, 100);
+    buzzer.tone(1000, 100); 
+    delay(100);
     
-    // Envoyer signal à Python : "J'ai fait 1m, je scanne"
-    Serial.println("EVENT:METRE");
-    performRadarScan(); // Faire le 360
+    // Lancer le scan radar automatique
+    performRadarScan();
     
-    lastMoveTime = millis(); // Reset du compteur 1m
+    lastMoveTime = millis(); // Reset du chrono 1m
   }
   
-  // CAS 3 : Voie libre -> Avancer
+  // CAS C : VOIE LIBRE -> AVANCER
   else {
     Forward();
   }
 }
 
-// --- FONCTION DE SCAN RADAR ---
+// ---------------------------------------------------------
+// FONCTION DE SCAN RADAR (FORMAT COMPATIBLE PYTHON)
+// ---------------------------------------------------------
 void performRadarScan() {
-  Serial.println("STATUS:SCAN_START");
-  rgb.setColor(30, 0, 30); // Violet
+  rgb.setColor(30, 0, 30); // Violet pendant le scan
   rgb.show();
 
   unsigned long scanStart = millis();
   
-  // Lancer la rotation
+  // Rotation sur place (gauche)
   MotorL.run(-turnSpeed);
   MotorR.run(turnSpeed);
 
+  // Boucle de scan pendant la durée d'un tour complet
   while (millis() - scanStart < TIME_FOR_360) {
-    // Calcul de l'angle estimé (règle de trois sur le temps)
+    
+    // 1. Calcul de l'angle (règle de trois temporelle)
     float progress = (float)(millis() - scanStart) / TIME_FOR_360;
     int angle = progress * 360;
     
-    // Lecture
+    // 2. Lecture distance
     float reading = ultr.distanceCm();
     if(reading == 0) reading = 400; 
 
-    // Envoi Format: "D:angle:distance"
-    Serial.print("D:");
+    // 3. ENVOI DES DONNEES (Format: "A:angle,D:distance")
+    // C'est ce format précis que votre script Python attend.
+    Serial.print("A:");
     Serial.print(angle);
-    Serial.print(":");
-    Serial.println(reading);
+    Serial.print(",D:");
+    Serial.println((int)reading);
     
-    delay(40); // Pause technique pour stabilité ultrason
+    delay(40); // Petite pause pour stabiliser le capteur
   }
 
-  Stop();
-  Serial.println("STATUS:SCAN_END");
-  rgb.setColor(0, 50, 0); // Retour vert
+  Stop(); // Fin du tour
+  
+  rgb.setColor(0, 50, 0); // Retour au vert
   rgb.show();
-  delay(500);
+  delay(500); // Stabilisation avant de repartir
 }
 
-// --- MOUVEMENTS MOTEURS ---
+// ---------------------------------------------------------
+// FONCTIONS DE MOUVEMENT BASIQUES
+// ---------------------------------------------------------
 void Forward() {
   MotorL.run(-moveSpeed);
   MotorR.run(moveSpeed);
 }
+
 void Backward() {
   MotorL.run(moveSpeed);
   MotorR.run(-moveSpeed);
 }
+
 void TurnLeft() {
-  MotorL.run(-moveSpeed);
+  MotorL.run(-moveSpeed); // Les deux moteurs dans le même sens pour tourner sur place
   MotorR.run(-moveSpeed);
 }
+
 void Stop() {
   MotorL.run(0);
   MotorR.run(0);
