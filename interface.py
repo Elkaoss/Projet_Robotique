@@ -163,7 +163,7 @@ class RadarInterface:
                     self.log_event("Erreur: Aucun port sélectionné")
                     return
                 
-                self.serial_port = serial.Serial(port, 57600, timeout=1)
+                self.serial_port = serial.Serial(port, 9600, timeout=1)
                 self.is_running = True
                 self.connect_btn.config(text="Déconnecter", bg='#330000', fg='#ff0000')
                 self.status_label.config(text="● Connecté", fg='#00ff00')
