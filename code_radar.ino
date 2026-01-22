@@ -1,5 +1,5 @@
 /*
- * ROBOT RADAR AUTONOME mBOT - VERSION AMÉLIORÉE
+ * ROBOT RADAR AUTONOME mBOT
  * Fonctionnalités :
  * 1. Navigation autonome (sans télécommande).
  * 2. Arrêt et Scan Radar si obstacle < 50cm.
@@ -11,10 +11,10 @@
 #include <Wire.h>
 #include <SoftwareSerial.h>
 
-// --- CONFIGURATION DES PORTS ---
-MeUltrasonic ultr(PORT_3);   // Capteur Ultrason sur le Port 3
-MeDCMotor MotorL(M1);        // Moteur Gauche sur M1
-MeDCMotor MotorR(M2);        // Moteur Droit sur M2
+// --- CONFIGURATION MATÉRIELLE ---
+MeUltrasonic ultr(PORT_3);   // Capteur Ultrason branché sur le Port 3
+MeDCMotor MotorL(M1);        // Moteur Gauche
+MeDCMotor MotorR(M2);        // Moteur Droit
 MeRGBLed rgb(7, 2);          // LED intégrée
 MeBuzzer buzzer;             // Buzzer intégré
 
@@ -24,59 +24,41 @@ int turnSpeed = 140;         // Vitesse de rotation pour le scan
 const unsigned long TIME_FOR_1M = 4000;  // Temps pour faire ~1 mètre (ms)
 const unsigned long TIME_FOR_360 = 2300; // Temps pour faire un tour complet (ms)
 
-// --- CONSTANTES ---
-const int OBSTACLE_DISTANCE = 50;  // Distance de détection obstacle (cm)
-const int MIN_DISTANCE = 10;       // Distance minimale valide (cm)
-const int MAX_DISTANCE = 400;      // Distance maximale du capteur (cm)
-const int SCAN_DELAY = 70;         // Délai entre mesures (ms) - HC-SR04 a besoin de ~60ms
-
-// --- VARIABLES ---
+// --- VARIABLES GLOBALES ---
 bool isRunning = false;          // État du robot
 unsigned long lastMoveTime = 0;  // Chronomètre pour la distance
 unsigned long lastButtonPress = 0; // Anti-rebond bouton
 float dist = 0;                  // Distance lue
 
 void setup() {
-  Serial.begin(57600); // Vitesse plus stable pour Arduino Uno (57600 au lieu de 115200)
+  Serial.begin(115200); // Vitesse rapide pour le transfert de données
   rgb.setNumber(16);
-  
-  // Signal de prêt (LED Bleue)
-  rgb.setColor(0, 0, 50);
+  rgb.setColor(0, 0, 50); // Bleu (En attente)
   rgb.show();
   Stop();
-  
-  delay(500); // Temps de stabilisation
-  Serial.println("STATUS:READY");
 }
 
 void loop() {
   // --- GESTION DU BOUTON START/STOP ---
   if (analogRead(A7) < 10) { // Si bouton appuyé
-    // Anti-rebond temporel (évite les doubles pressions)
-    if (millis() - lastButtonPress > 500) {
-      lastButtonPress = millis();
+    delay(50); // Anti-rebond
+    if (analogRead(A7) < 10) {
       isRunning = !isRunning; // Inverser l'état
       
       if (isRunning) {
         // Démarrage
-        rgb.setColor(0, 50, 0); // Vert
+        rgb.setColor(0, 50, 0); // Vert = Marche
         rgb.show();
         buzzer.tone(1000, 200);
-        Serial.println("STATUS:STARTED");
         lastMoveTime = millis(); // Reset du chrono
         delay(1000); // Temps pour retirer sa main
       } else {
         // Arrêt
         Stop();
-        rgb.setColor(50, 0, 0); // Rouge
+        rgb.setColor(50, 0, 0); // Rouge = Stop
         rgb.show();
         buzzer.tone(500, 200);
-        Serial.println("STATUS:STOPPED");
-      }
-      
-      // Attendre relâchement du bouton
-      while(analogRead(A7) < 10) {
-        delay(10);
+        while(analogRead(A7) < 10); // Attendre relâchement
       }
     }
   }
@@ -84,20 +66,18 @@ void loop() {
   // Si le robot est en pause, on arrête la boucle ici
   if (!isRunning) return;
 
-  // --- LECTURE CAPTEURS ---
+  // ---------------------------------------------------------
+  // 2. LECTURE CAPTEURS & LOGIQUE
+  // ---------------------------------------------------------
   dist = ultr.distanceCm();
-  
-  // Correction des valeurs aberrantes
-  if (dist == 0 || dist < MIN_DISTANCE) {
-    dist = MAX_DISTANCE; // Considérer comme "rien détecté"
-  }
+  if (dist == 0) dist = 400; // Correction bruit capteur
 
   // --- LOGIQUE DE NAVIGATION ---
 
   // CAS 1 : Obstacle détecté (< 50cm)
-  if (dist < OBSTACLE_DISTANCE) {
+  if (dist < 50) {
     Stop();
-    buzzer.tone(2000, 100); // Bip aigu
+    buzzer.tone(2000, 100); // Bip d'alerte
     delay(200);
     
     // Envoyer signal à Python : "J'ai trouvé un obstacle, je scanne"
@@ -105,93 +85,74 @@ void loop() {
     performRadarScan(); // Faire le 360
 
     // Manœuvre d'évitement
-    Backward(); 
-    delay(600);
+    Backward(); delay(600);
+    TurnLeft(); delay(700); // Tourner d'environ 90° (ajuster délai)
+    Stop();     delay(300);
     
-    TurnLeft(); 
-    delay(700); // Tourner d'environ 90° (ajuster délai selon calibrage)
-    
-    Stop();     
-    delay(300);
-    
-    lastMoveTime = millis(); // Reset du compteur 1m
+    lastMoveTime = millis(); // Reset du chrono 1m
   }
   
-  // CAS 2 : 1 Mètre parcouru (Temps écoulé)
+  // CAS B : 1 MÈTRE PARCOURU (Simulé par le temps)
   else if (millis() - lastMoveTime > TIME_FOR_1M) {
     Stop();
-    buzzer.tone(1000, 100); 
-    delay(100); 
-    buzzer.tone(1000, 100);
+    buzzer.tone(1000, 100); delay(100); buzzer.tone(1000, 100);
     
-    // Envoyer signal à Python : "J'ai fait 1m, je scanne"
-    Serial.println("EVENT:METRE");
-    performRadarScan(); // Faire le 360
+    // Lancer le scan radar automatique
+    performRadarScan();
     
-    lastMoveTime = millis(); // Reset du compteur 1m
+    lastMoveTime = millis(); // Reset du chrono 1m
   }
   
-  // CAS 3 : Voie libre -> Avancer
+  // CAS C : VOIE LIBRE -> AVANCER
   else {
     Forward();
   }
 }
 
-// --- FONCTION DE SCAN RADAR ---
+// ---------------------------------------------------------
+// FONCTION DE SCAN RADAR (FORMAT COMPATIBLE PYTHON)
+// ---------------------------------------------------------
 void performRadarScan() {
-  Serial.println("STATUS:SCAN_START");
-  rgb.setColor(30, 0, 30); // Violet
+  rgb.setColor(30, 0, 30); // Violet pendant le scan
   rgb.show();
 
   unsigned long scanStart = millis();
   unsigned long lastMeasure = 0;
   int measureCount = 0;
   
-  // Lancer la rotation
+  // Rotation sur place (gauche)
   MotorL.run(-turnSpeed);
   MotorR.run(turnSpeed);
 
+  // Boucle de scan pendant la durée d'un tour complet
   while (millis() - scanStart < TIME_FOR_360) {
-    // Ne mesurer que toutes les SCAN_DELAY ms
-    if (millis() - lastMeasure >= SCAN_DELAY) {
-      lastMeasure = millis();
-      
-      // Calcul de l'angle estimé (règle de trois sur le temps)
-      float progress = (float)(millis() - scanStart) / TIME_FOR_360;
-      int angle = (int)(progress * 360);
-      
-      // S'assurer que l'angle reste dans [0, 360]
-      if (angle > 360) angle = 360;
-      
-      // Lecture du capteur
-      float reading = ultr.distanceCm();
-      
-      // Correction des valeurs aberrantes
-      if (reading == 0 || reading < MIN_DISTANCE) {
-        reading = MAX_DISTANCE;
-      }
+    // Calcul de l'angle estimé (règle de trois sur le temps)
+    float progress = (float)(millis() - scanStart) / TIME_FOR_360;
+    int angle = progress * 360;
+    
+    // Lecture
+    float reading = ultr.distanceCm();
+    if(reading == 0) reading = 400; 
 
-      // Envoi Format: "D:angle:distance"
-      Serial.print("D:");
-      Serial.print(angle);
-      Serial.print(":");
-      Serial.println(reading);
-      
-      measureCount++;
-    }
+    // Envoi Format: "D:angle:distance"
+    Serial.print("D:");
+    Serial.print(angle);
+    Serial.print(":");
+    Serial.println(reading);
+    
+    delay(40); // Pause technique pour stabilité ultrason
   }
 
   Stop();
   Serial.println("STATUS:SCAN_END");
-  Serial.print("STATUS:MEASURES:");
-  Serial.println(measureCount); // Nombre de mesures effectuées
-  
   rgb.setColor(0, 50, 0); // Retour vert
   rgb.show();
-  delay(500);
+  delay(500); // Stabilisation avant de repartir
 }
 
-// --- MOUVEMENTS MOTEURS ---
+// ---------------------------------------------------------
+// FONCTIONS DE MOUVEMENT BASIQUES
+// ---------------------------------------------------------
 void Forward() {
   MotorL.run(-moveSpeed);
   MotorR.run(moveSpeed);
@@ -203,15 +164,9 @@ void Backward() {
 }
 
 void TurnLeft() {
-  MotorL.run(-moveSpeed);
+  MotorL.run(-moveSpeed); // Les deux moteurs dans le même sens pour tourner sur place
   MotorR.run(-moveSpeed);
 }
-
-void TurnRight() {
-  MotorL.run(moveSpeed);
-  MotorR.run(moveSpeed);
-}
-
 void Stop() {
   MotorL.run(0);
   MotorR.run(0);
